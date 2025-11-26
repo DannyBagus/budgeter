@@ -1,0 +1,13 @@
+services:
+  finanz-app:
+    build: .
+    container_name: finanz-dashboard
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      # WICHTIG: Wir mappen die CSV-Datei vom Host in den Container.
+      # So bleiben die Daten erhalten, auch wenn du den Container löschst/neu baust.
+      - ./master_ausgaben.csv:/app/master_ausgaben.csv
+    environment:
+      - TZ=Europe/Zurich  # Damit die Logs die richtige Zeit haben
