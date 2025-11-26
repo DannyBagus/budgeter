@@ -209,16 +209,22 @@ c4.metric("Transaktionen", len(df_filtered))
 st.divider()
 
 # ---------------------------------------------------------
-# 4. Interaktive Grafiken (Bar Chart statt Pie Chart)
+# 4. Interaktive Grafiken (Bar Chart)
 # ---------------------------------------------------------
 
-# --- Session State für Filter initialisieren ---
+# --- Session State für Synchronisation initialisieren ---
 if "selected_cat_filter" not in st.session_state:
     st.session_state.selected_cat_filter = "Alle"
 
-# Callback für Selectbox (leer lassen, State wird automatisch gehandelt)
-def update_filter_from_box():
-    pass
+# Hilfsvariable: Merkt sich, was zuletzt im CHART geklickt wurde
+if "last_chart_value" not in st.session_state:
+    st.session_state.last_chart_value = None
+
+# Callback für die Selectbox
+def on_box_change():
+    # Wenn der User die Box benutzt, "vergessen" wir den Chart-Status.
+    # Das erlaubt es, danach wieder auf denselben Balken zu klicken, um ihn erneut zu aktivieren.
+    st.session_state.last_chart_value = None
 
 col_chart1, col_chart2 = st.columns(2)
 
@@ -227,30 +233,26 @@ with col_chart1:
     st.subheader("Ausgaben nach Kategorie (Top)")
     
     if not df_expenses.empty:
-        # 1. Daten aggregieren und sortieren
         df_cat_view = df_expenses.groupby('Kategorie', as_index=False)['Betrag CHF'].sum()
-        df_cat_view = df_cat_view.sort_values(by='Betrag CHF', ascending=True) # Sortierung für Chart
+        df_cat_view = df_cat_view.sort_values(by='Betrag CHF', ascending=True)
         
-        # 2. Bar Chart erstellen (Besser klickbar als Pie)
         fig_cat = px.bar(
             df_cat_view, 
             x='Betrag CHF', 
             y='Kategorie', 
-            orientation='h', # Horizontal ist besser lesbar
-            text_auto='.2s', # Zeigt Werte direkt an
-            color='Kategorie', # Färbung für Wiedererkennung
+            orientation='h',
+            text_auto='.2s',
+            color='Kategorie',
             color_discrete_sequence=px.colors.qualitative.Pastel
         )
         
-        # 3. Layout aufräumen (Keine Legende, da Labels an der Achse stehen)
         fig_cat.update_layout(
-            showlegend=False, # WICHTIG: Verhindert die Verwirrung mit der Legende!
+            showlegend=False,
             margin=dict(l=0, r=0, t=0, b=0),
             clickmode='event+select'
         )
         
-        # 4. Chart rendern & Event abfangen
-        # key="cat_chart" ist wichtig für den State
+        # Chart rendern
         event = st.plotly_chart(
             fig_cat, 
             use_container_width=True, 
@@ -259,24 +261,28 @@ with col_chart1:
             key="cat_chart"
         )
         
-        # 5. Klick-Logik auswerten
+        # --- Die entscheidende Logik für die Synchronisation ---
         if event and len(event.selection["points"]) > 0:
             try:
-                # Bei Bar Charts ist "y" die Kategorie (da horizontal)
                 first_point = event.selection["points"][0]
-                clicked_category = first_point["y"]
+                clicked_category = first_point["y"] # Bei horizontalen Bars ist Y die Kategorie
                 
-                # Filter setzen, wenn abweichend
-                if st.session_state.selected_cat_filter != clicked_category:
+                # Wir aktualisieren den Filter NUR, wenn sich der Klick im Chart GEÄNDERT hat
+                # oder wenn es der allererste Klick ist.
+                # Das verhindert, dass der "alte" Klick im Chart eine Änderung in der Selectbox überschreibt.
+                if clicked_category != st.session_state.last_chart_value:
                     st.session_state.selected_cat_filter = clicked_category
+                    st.session_state.last_chart_value = clicked_category
                     st.rerun()
             except Exception:
-                pass # Fehler ignorieren
+                pass
         
-        # Deselektieren (Klick in Leere) -> Reset auf Alle
+        # Wenn im Chart "ins Leere" geklickt wurde (Deselect)
         elif event and len(event.selection["points"]) == 0:
-            if st.session_state.selected_cat_filter != "Alle":
+            # Nur resetten, wenn wir vorher einen Chart-Wert hatten
+            if st.session_state.last_chart_value is not None:
                 st.session_state.selected_cat_filter = "Alle"
+                st.session_state.last_chart_value = None
                 st.rerun()
 
     else:
@@ -318,22 +324,24 @@ col_head1, col_head2 = st.columns([3, 1])
 with col_head1:
     st.subheader("🔍 Details")
 with col_head2:
+    # Reset Button
     if st.button("Filter zurücksetzen"):
         st.session_state.selected_cat_filter = "Alle"
+        st.session_state.last_chart_value = None # Auch Chart-Memory resetten
         st.rerun()
 
 cats = ["Alle"] + sorted(df_filtered['Kategorie'].astype(str).unique().tolist())
 
-# Validierung: Ist der Filter noch gültig?
+# Validierung des Filters (falls sich Zeitfenster ändert)
 if st.session_state.selected_cat_filter not in cats:
     st.session_state.selected_cat_filter = "Alle"
 
-# Selectbox (Synchronisiert)
+# Selectbox
 sel_cat = st.selectbox(
     "Kategorie filtern:", 
     options=cats,
-    key="selected_cat_filter",
-    on_change=update_filter_from_box
+    key="selected_cat_filter", # Bindet an den Session State
+    on_change=on_box_change    # WICHTIG: Feuert Reset-Logik beim manuellen Ändern
 )
 
 if sel_cat != "Alle":
