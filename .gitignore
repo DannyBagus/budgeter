@@ -1,15 +1,10 @@
-# Ignore Python cache files
+# Ignoriere die Datenbank/CSV mit echten Daten
+master_ausgaben.csv
+ai_prompt.txt
+
+# Ignoriere Systemdateien
 __pycache__/
-*.py[cod]
-
-# Ignore virtual environment directories
-venv/
+*.pyc
+.DS_Store
 .env
-
-# Ignore IDE specific files
-.vscode/
-
-
-# Ignore project specific files
-*.csv
-*.txt
+.venv/
