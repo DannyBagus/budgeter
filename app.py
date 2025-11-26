@@ -42,6 +42,11 @@ def save_to_master(df):
 # ---------------------------------------------------------
 st.sidebar.header("📥 Daten-Import")
 
+# Cache leeren & Daten neu laden
+if st.sidebar.button("🔄 Daten neu laden & Cache leeren"):
+    st.cache_data.clear()
+    st.rerun()
+
 uploaded_file = st.sidebar.file_uploader("Neue CSV hochladen", type=['csv'])
 
 if uploaded_file is not None:
