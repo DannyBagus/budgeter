@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import time
 
 # Datei-Pfad für die "Master-Datenbank"
 MASTER_FILE = 'master_ausgaben.csv'
@@ -36,52 +37,128 @@ def save_to_master(df):
     df_save = df.copy()
     df_save['Datum'] = df_save['Datum'].dt.strftime('%d.%m.%Y')
     df_save.to_csv(MASTER_FILE, index=False)
+    
+import time # Stelle sicher, dass das ganz oben im File importiert ist!
 
 # ---------------------------------------------------------
-# 2. Sidebar: Datei-Upload & Daten-Management
+# 2. Sidebar: Daten-Import (Stabilisiert)
 # ---------------------------------------------------------
 st.sidebar.header("📥 Daten-Import")
 
-# Cache leeren & Daten neu laden
-if st.sidebar.button("🔄 Daten neu laden & Cache leeren"):
-    st.cache_data.clear()
-    st.rerun()
+# --- A. Session State initialisieren ---
+# Wir brauchen Variablen, die einen Reload überleben
+if 'uploader_key' not in st.session_state:
+    st.session_state.uploader_key = 0
+if 'staging_df' not in st.session_state:
+    st.session_state.staging_df = None  # Hier parken wir die Daten vor dem Speichern
 
-uploaded_file = st.sidebar.file_uploader("Neue CSV hochladen", type=['csv'])
+# --- B. Datei Uploader ---
+# Der Key sorgt dafür, dass wir den Uploader später "leeren" können
+uploaded_file = st.sidebar.file_uploader(
+    "Neue CSV-Abrechnung hochladen", 
+    type=['csv'], 
+    key=f"uploader_{st.session_state.uploader_key}"
+)
 
-if uploaded_file is not None:
+# --- C. Verarbeitungs-Logik (läuft sofort nach Upload) ---
+if uploaded_file is not None and st.session_state.staging_df is None:
     try:
-        new_df = pd.read_csv(uploaded_file)
+        temp_df = pd.read_csv(uploaded_file)
         
-        # Prüfung: Sind alle Spalten da?
-        if not set(REQUIRED_COLUMNS).issubset(new_df.columns):
-            st.sidebar.error(f"Fehler: CSV benötigt Spalten: {REQUIRED_COLUMNS}")
+        # Check: Passen die Spalten?
+        missing_cols = [c for c in REQUIRED_COLUMNS if c not in temp_df.columns]
+        
+        if not missing_cols:
+            # Fall 1: Perfekter Match -> Direkt in den Zwischenspeicher
+            st.session_state.staging_df = temp_df
+            st.rerun() # Sofort neu laden, um zum Speicher-Dialog zu kommen
+            
         else:
+            # Fall 2: Mapping nötig
+            st.sidebar.warning("⚠️ Spalten zuweisen:")
+            
+            with st.sidebar.form("mapping_form"):
+                col_map = {}
+                for req_col in REQUIRED_COLUMNS:
+                    # Versuch einer automatischen Zuordnung
+                    default_idx = 0
+                    for i, col_name in enumerate(temp_df.columns):
+                        if req_col.lower() in col_name.lower():
+                            default_idx = i
+                            break
+                    
+                    col_map[req_col] = st.selectbox(
+                        f"Ziel: '{req_col}'", 
+                        options=temp_df.columns,
+                        index=default_idx
+                    )
+                
+                if st.form_submit_button("Mapping anwenden"):
+                    # Umbenennen und in den Zwischenspeicher schieben
+                    rename_dict = {v: k for k, v in col_map.items()}
+                    mapped_df = temp_df.rename(columns=rename_dict)
+                    st.session_state.staging_df = mapped_df[REQUIRED_COLUMNS]
+                    st.rerun()
+
+    except Exception as e:
+        st.sidebar.error(f"Fehler beim Lesen: {e}")
+
+# --- D. Speicher-Dialog (Nur sichtbar, wenn Daten im Zwischenspeicher sind) ---
+if st.session_state.staging_df is not None:
+    st.sidebar.success("Daten bereit zum Import! ✅")
+    
+    # Kleine Vorschau in der Sidebar
+    rows = len(st.session_state.staging_df)
+    st.sidebar.caption(f"{rows} Zeilen erkannt.")
+    
+    # 1. Button: Speichern
+    if st.sidebar.button("💾 In Master-Datei speichern"):
+        try:
+            # Master laden
             master_df = load_master_data()
+            new_data = st.session_state.staging_df.copy()
             
-            # Datenaufbereitung der NEUEN Daten
-            new_df['Datum'] = pd.to_datetime(new_df['Datum'], format='%d.%m.%Y', errors='coerce')
+            # Datentypen erzwingen
+            new_data['Datum'] = pd.to_datetime(new_data['Datum'], dayfirst=True, errors='coerce')
             
-            # Betrag bereinigen (Falls Strings mit ' kommen)
-            if new_df['Betrag CHF'].dtype == 'object':
-                new_df['Betrag CHF'] = new_df['Betrag CHF'].str.replace("'", "").astype(float)
+            def clean_money(val):
+                if isinstance(val, str):
+                    val = val.replace("'", "").replace(",", ".")
+                return float(val)
             
+            if new_data['Betrag CHF'].dtype == 'object':
+                new_data['Betrag CHF'] = new_data['Betrag CHF'].apply(clean_money)
+            
+            # Zusammenfügen
             rows_before = len(master_df)
-            
-            # Merge & Duplikate entfernen
-            combined_df = pd.concat([master_df, new_df])
+            combined_df = pd.concat([master_df, new_data])
             combined_df = combined_df.drop_duplicates(subset=['Datum', 'Detail', 'Betrag CHF'], keep='first')
-            
             rows_added = len(combined_df) - rows_before
             
-            if st.sidebar.button(f"{rows_added} neue Zeilen speichern?"):
-                save_to_master(combined_df)
-                st.sidebar.success("Gespeichert! Bitte Seite neu laden (F5).")
-                
-    except Exception as e:
-        st.sidebar.error(f"Fehler beim Verarbeiten: {e}")
+            # Speichern
+            save_to_master(combined_df)
+            
+            # Aufräumen
+            st.cache_data.clear()
+            st.session_state.staging_df = None # Zwischenspeicher leeren
+            st.session_state.uploader_key += 1 # Uploader zurücksetzen
+            
+            # Visuelles Feedback (massiv und sichtbar)
+            msg = st.sidebar.empty()
+            msg.success(f"✅ Fertig! {rows_added} neu.")
+            time.sleep(2.5) # Zeit zum Lesen geben
+            msg.empty()
+            
+            st.rerun()
+            
+        except Exception as e:
+            st.sidebar.error(f"Fehler beim Speichern: {e}")
 
-st.sidebar.markdown("---")
+    # 2. Button: Abbrechen
+    if st.sidebar.button("❌ Abbrechen / Zurücksetzen"):
+        st.session_state.staging_df = None
+        st.session_state.uploader_key += 1
+        st.rerun()
 
 # ---------------------------------------------------------
 # 3. Das Dashboard (Visualisierung)
