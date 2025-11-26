@@ -1,10 +1,12 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import os
 import time
 
+# ---------------------------------------------------------
+# 0. Konfiguration
+# ---------------------------------------------------------
 # Datei-Pfad für die "Master-Datenbank"
 MASTER_FILE = 'master_ausgaben.csv'
 
@@ -37,8 +39,6 @@ def save_to_master(df):
     df_save = df.copy()
     df_save['Datum'] = df_save['Datum'].dt.strftime('%d.%m.%Y')
     df_save.to_csv(MASTER_FILE, index=False)
-    
-import time # Stelle sicher, dass das ganz oben im File importiert ist!
 
 # ---------------------------------------------------------
 # 2. Sidebar: Daten-Import (Stabilisiert)
@@ -46,14 +46,12 @@ import time # Stelle sicher, dass das ganz oben im File importiert ist!
 st.sidebar.header("📥 Daten-Import")
 
 # --- A. Session State initialisieren ---
-# Wir brauchen Variablen, die einen Reload überleben
 if 'uploader_key' not in st.session_state:
     st.session_state.uploader_key = 0
 if 'staging_df' not in st.session_state:
     st.session_state.staging_df = None  # Hier parken wir die Daten vor dem Speichern
 
 # --- B. Datei Uploader ---
-# Der Key sorgt dafür, dass wir den Uploader später "leeren" können
 uploaded_file = st.sidebar.file_uploader(
     "Neue CSV-Abrechnung hochladen", 
     type=['csv'], 
@@ -71,7 +69,7 @@ if uploaded_file is not None and st.session_state.staging_df is None:
         if not missing_cols:
             # Fall 1: Perfekter Match -> Direkt in den Zwischenspeicher
             st.session_state.staging_df = temp_df
-            st.rerun() # Sofort neu laden, um zum Speicher-Dialog zu kommen
+            st.rerun() # UI neu laden
             
         else:
             # Fall 2: Mapping nötig
@@ -107,14 +105,12 @@ if uploaded_file is not None and st.session_state.staging_df is None:
 if st.session_state.staging_df is not None:
     st.sidebar.success("Daten bereit zum Import! ✅")
     
-    # Kleine Vorschau in der Sidebar
     rows = len(st.session_state.staging_df)
     st.sidebar.caption(f"{rows} Zeilen erkannt.")
     
     # 1. Button: Speichern
     if st.sidebar.button("💾 In Master-Datei speichern"):
         try:
-            # Master laden
             master_df = load_master_data()
             new_data = st.session_state.staging_df.copy()
             
@@ -129,39 +125,42 @@ if st.session_state.staging_df is not None:
             if new_data['Betrag CHF'].dtype == 'object':
                 new_data['Betrag CHF'] = new_data['Betrag CHF'].apply(clean_money)
             
-            # Zusammenfügen
+            # Zusammenfügen & Deduplizieren
             rows_before = len(master_df)
             combined_df = pd.concat([master_df, new_data])
             combined_df = combined_df.drop_duplicates(subset=['Datum', 'Detail', 'Betrag CHF'], keep='first')
             rows_added = len(combined_df) - rows_before
             
-            # Speichern
+            # Speichern & Aufräumen
             save_to_master(combined_df)
+            st.cache_data.clear() # Cache leeren wichtig!
+            st.session_state.staging_df = None
+            st.session_state.uploader_key += 1
             
-            # Aufräumen
-            st.cache_data.clear()
-            st.session_state.staging_df = None # Zwischenspeicher leeren
-            st.session_state.uploader_key += 1 # Uploader zurücksetzen
-            
-            # Visuelles Feedback (massiv und sichtbar)
+            # Feedback
             msg = st.sidebar.empty()
-            msg.success(f"✅ Fertig! {rows_added} neu.")
-            time.sleep(2.5) # Zeit zum Lesen geben
-            msg.empty()
+            if rows_added > 0:
+                msg.success(f"✅ {rows_added} Zeilen gespeichert!")
+            else:
+                msg.info("Keine neuen Zeilen (alles Duplikate).")
             
+            time.sleep(2.0) # Zeit zum Lesen geben
+            msg.empty()
             st.rerun()
             
         except Exception as e:
             st.sidebar.error(f"Fehler beim Speichern: {e}")
 
     # 2. Button: Abbrechen
-    if st.sidebar.button("❌ Abbrechen / Zurücksetzen"):
+    if st.sidebar.button("❌ Abbrechen"):
         st.session_state.staging_df = None
         st.session_state.uploader_key += 1
         st.rerun()
 
+st.sidebar.markdown("---")
+
 # ---------------------------------------------------------
-# 3. Das Dashboard (Visualisierung)
+# 3. Dashboard Daten & Filter
 # ---------------------------------------------------------
 
 df = load_master_data()
@@ -170,10 +169,9 @@ if df.empty:
     st.info("👋 Willkommen! Noch keine Daten vorhanden. Bitte lade links deine erste CSV-Datei hoch.")
     st.stop()
 
-# Hilfsspalten
 df['Monat_Jahr'] = df['Datum'].dt.to_period('M').astype(str)
 
-# --- A. Datumsfilter ---
+# --- Datumsfilter ---
 st.sidebar.subheader("🔎 Zeit-Filter")
 min_date = df['Datum'].min()
 max_date = df['Datum'].max()
@@ -189,67 +187,112 @@ start_date, end_date = st.sidebar.date_input(
     max_value=max_date
 )
 
-# Filtern
 mask = (df['Datum'] >= pd.to_datetime(start_date)) & (df['Datum'] <= pd.to_datetime(end_date))
 df_filtered = df.loc[mask].copy()
 
-# ---------------------------------------------------------
-# 4. Logik für Einnahmen vs. Ausgaben
-# ---------------------------------------------------------
-# Konvention aus Prompt:
-# Ausgaben > 0 (Positiv)
-# Einnahmen < 0 (Negativ)
-
-# Wir trennen die Dataframes für einfachere Berechnung
+# --- Daten Trennung ---
 df_expenses = df_filtered[df_filtered['Betrag CHF'] > 0].copy()
 df_income = df_filtered[df_filtered['Betrag CHF'] < 0].copy()
 
-# Summen berechnen
-# Bei Income drehen wir das Vorzeichen für die Anzeige um (* -1), damit es "positiv" aussieht
 total_expenses = df_expenses['Betrag CHF'].sum()
 total_income = df_income['Betrag CHF'].sum() * -1 
 balance = total_income - total_expenses
 savings_rate = (balance / total_income * 100) if total_income > 0 else 0
 
-# --- B. KPIs ---
-col1, col2, col3, col4 = st.columns(4)
-
-col1.metric("Einnahmen", f"CHF {total_income:,.2f}", delta_color="normal")
-col2.metric("Ausgaben", f"CHF {total_expenses:,.2f}", delta_color="inverse") # Inverse macht Rot bei hohen Werten
-col3.metric("Bilanz (Sparbetrag)", f"CHF {balance:,.2f}", delta=f"{savings_rate:.1f}% Sparquote")
-col4.metric("Transaktionen", len(df_filtered))
+# --- KPIs ---
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Einnahmen", f"CHF {total_income:,.2f}", delta_color="normal")
+c2.metric("Ausgaben", f"CHF {total_expenses:,.2f}", delta_color="inverse")
+c3.metric("Bilanz", f"CHF {balance:,.2f}", delta=f"{savings_rate:.1f}% Sparquote")
+c4.metric("Transaktionen", len(df_filtered))
 
 st.divider()
 
-# --- C. Grafiken ---
+# ---------------------------------------------------------
+# 4. Interaktive Grafiken (Bar Chart statt Pie Chart)
+# ---------------------------------------------------------
+
+# --- Session State für Filter initialisieren ---
+if "selected_cat_filter" not in st.session_state:
+    st.session_state.selected_cat_filter = "Alle"
+
+# Callback für Selectbox (leer lassen, State wird automatisch gehandelt)
+def update_filter_from_box():
+    pass
+
 col_chart1, col_chart2 = st.columns(2)
 
+# --- A. Ausgaben nach Kategorie (Horizontal Bar) ---
 with col_chart1:
-    st.subheader("Ausgaben nach Kategorie")
+    st.subheader("Ausgaben nach Kategorie (Top)")
+    
     if not df_expenses.empty:
-        fig_pie = px.pie(
-            df_expenses, 
-            values='Betrag CHF', 
-            names='Kategorie', 
-            hole=0.4,
+        # 1. Daten aggregieren und sortieren
+        df_cat_view = df_expenses.groupby('Kategorie', as_index=False)['Betrag CHF'].sum()
+        df_cat_view = df_cat_view.sort_values(by='Betrag CHF', ascending=True) # Sortierung für Chart
+        
+        # 2. Bar Chart erstellen (Besser klickbar als Pie)
+        fig_cat = px.bar(
+            df_cat_view, 
+            x='Betrag CHF', 
+            y='Kategorie', 
+            orientation='h', # Horizontal ist besser lesbar
+            text_auto='.2s', # Zeigt Werte direkt an
+            color='Kategorie', # Färbung für Wiedererkennung
             color_discrete_sequence=px.colors.qualitative.Pastel
         )
-        st.plotly_chart(fig_pie, use_container_width=True)
-    else:
-        st.info("Keine Ausgaben im gewählten Zeitraum.")
+        
+        # 3. Layout aufräumen (Keine Legende, da Labels an der Achse stehen)
+        fig_cat.update_layout(
+            showlegend=False, # WICHTIG: Verhindert die Verwirrung mit der Legende!
+            margin=dict(l=0, r=0, t=0, b=0),
+            clickmode='event+select'
+        )
+        
+        # 4. Chart rendern & Event abfangen
+        # key="cat_chart" ist wichtig für den State
+        event = st.plotly_chart(
+            fig_cat, 
+            use_container_width=True, 
+            on_select="rerun", 
+            selection_mode="points", 
+            key="cat_chart"
+        )
+        
+        # 5. Klick-Logik auswerten
+        if event and len(event.selection["points"]) > 0:
+            try:
+                # Bei Bar Charts ist "y" die Kategorie (da horizontal)
+                first_point = event.selection["points"][0]
+                clicked_category = first_point["y"]
+                
+                # Filter setzen, wenn abweichend
+                if st.session_state.selected_cat_filter != clicked_category:
+                    st.session_state.selected_cat_filter = clicked_category
+                    st.rerun()
+            except Exception:
+                pass # Fehler ignorieren
+        
+        # Deselektieren (Klick in Leere) -> Reset auf Alle
+        elif event and len(event.selection["points"]) == 0:
+            if st.session_state.selected_cat_filter != "Alle":
+                st.session_state.selected_cat_filter = "Alle"
+                st.rerun()
 
+    else:
+        st.info("Keine Ausgaben im Zeitraum.")
+
+# --- B. Trend Chart (Bleibt gleich) ---
 with col_chart2:
-    st.subheader("Einnahmen vs. Ausgaben (Trend)")
+    st.subheader("Trend: Einnahmen vs. Ausgaben")
     
-    # Wir müssen Einnahmen und Ausgaben pro Monat gruppieren
     monthly_exp = df_expenses.groupby('Monat_Jahr')['Betrag CHF'].sum().reset_index()
     monthly_exp['Typ'] = 'Ausgaben'
     
     monthly_inc = df_income.groupby('Monat_Jahr')['Betrag CHF'].sum().reset_index()
-    monthly_inc['Betrag CHF'] = monthly_inc['Betrag CHF'] * -1 # Vorzeichen drehen für Chart
+    monthly_inc['Betrag CHF'] = monthly_inc['Betrag CHF'] * -1 
     monthly_inc['Typ'] = 'Einnahmen'
     
-    # Zusammenfügen für Plotly
     df_trend = pd.concat([monthly_exp, monthly_inc])
     
     if not df_trend.empty:
@@ -258,31 +301,51 @@ with col_chart2:
             x='Monat_Jahr', 
             y='Betrag CHF', 
             color='Typ',
-            barmode='group', # Nebeneinander
-            color_discrete_map={'Einnahmen': '#2ecc71', 'Ausgaben': '#e74c3c'} # Grün / Rot
+            barmode='group',
+            color_discrete_map={'Einnahmen': '#2ecc71', 'Ausgaben': '#e74c3c'}
         )
+        fig_bar.update_layout(margin=dict(l=0, r=0, t=0, b=0))
         st.plotly_chart(fig_bar, use_container_width=True)
     else:
         st.info("Keine Daten für Trend.")
 
-# --- D. Drill Down Tabelle ---
+# ---------------------------------------------------------
+# 5. Drill-Down Tabelle (Synchronisiert)
+# ---------------------------------------------------------
 st.divider()
-st.subheader("Details")
+
+col_head1, col_head2 = st.columns([3, 1])
+with col_head1:
+    st.subheader("🔍 Details")
+with col_head2:
+    if st.button("Filter zurücksetzen"):
+        st.session_state.selected_cat_filter = "Alle"
+        st.rerun()
 
 cats = ["Alle"] + sorted(df_filtered['Kategorie'].astype(str).unique().tolist())
-sel_cat = st.selectbox("Kategorie filtern:", cats)
+
+# Validierung: Ist der Filter noch gültig?
+if st.session_state.selected_cat_filter not in cats:
+    st.session_state.selected_cat_filter = "Alle"
+
+# Selectbox (Synchronisiert)
+sel_cat = st.selectbox(
+    "Kategorie filtern:", 
+    options=cats,
+    key="selected_cat_filter",
+    on_change=update_filter_from_box
+)
 
 if sel_cat != "Alle":
     df_display = df_filtered[df_filtered['Kategorie'] == sel_cat]
+    st.info(f"Zeige Details für: **{sel_cat}**")
 else:
     df_display = df_filtered
 
-# Styling Funktion für die Tabelle (Rot/Grün)
 def color_amounts(val):
-    color = 'red' if val > 0 else 'green' # >0 sind Ausgaben (Rot), <0 Einnahmen (Grün)
+    color = 'red' if val > 0 else 'green'
     return f'color: {color}'
 
-# Tabelle anzeigen
 st.dataframe(
     df_display.sort_values(by="Datum", ascending=False).style.map(color_amounts, subset=['Betrag CHF']),
     column_config={
